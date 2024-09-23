@@ -30,7 +30,7 @@ import logging
 
 
 class Experiment:
-    def __init__(self, args):
+    def __init__(self, args, d, device, writer, logger):
         self.save = args.save
         self.save_prefix = "%s_%s" % (args.data_dir.split("/")[-1], args.log)
         
@@ -51,11 +51,16 @@ class Experiment:
 
         self.cached_sample = {}
         self.best_result = ()
+        self.d = d
+        self.device = device
+        self.writer = writer
+        self.logger = logger
 
 
     def evaluate(self, it, test, ins_emb, mapping_emb=None):
         t_test = time.time()
         top_k = [1, 3, 5, 10]
+        logger = self.logger
         if mapping_emb is not None:
             logger.info("using mapping")
             left_emb = mapping_emb[test[:, 0]]
@@ -97,6 +102,7 @@ class Experiment:
         
         logger.info("l2r: acc of top {} = {}, mr = {:.3f}, mrr = {:.3f}, time = {:.4f} s ".format(top_k, acc_l2r.tolist(), mean_l2r, mrr_l2r, time.time() - t_test))
         logger.info("r2l: acc of top {} = {}, mr = {:.3f}, mrr = {:.3f}, time = {:.4f} s \n".format(top_k, acc_r2l.tolist(), mean_r2l, mrr_r2l, time.time() - t_test))
+        writer = self.writer
         for i, k in enumerate(top_k):
             writer.add_scalar("l2r_HitsAt{}".format(k), acc_l2r[i], it)
             writer.add_scalar("r2l_HitsAt{}".format(k), acc_r2l[i], it)
@@ -108,6 +114,7 @@ class Experiment:
 
 
     def init_emb(self):
+        device = self.device
         e_scale, r_scale = 1, 1
         if not self.args.encoder:
             if self.args.decoder == ["rotate"]:
@@ -118,8 +125,8 @@ class Experiment:
                 r_scale = r_scale * 2
             elif self.args.decoder == ["transr"]:
                 r_scale = self.hiddens[0] + 1
-        self.ins_embeddings = nn.Embedding(d.ins_num, self.hiddens[0] * e_scale).to(device)
-        self.rel_embeddings = nn.Embedding(d.rel_num, int(self.hiddens[0] * r_scale)).to(device)
+        self.ins_embeddings = nn.Embedding(self.d.ins_num, self.hiddens[0] * e_scale).to(device)
+        self.rel_embeddings = nn.Embedding(self.d.rel_num, int(self.hiddens[0] * r_scale)).to(device)
         if self.args.decoder == ["rotate"] or self.args.decoder == ["hake"]:
             ins_range = (self.args.margin[0] + 2.0) / float(self.hiddens[0] * e_scale)
             nn.init.uniform_(tensor=self.ins_embeddings.weight, a=-ins_range, b=ins_range)
@@ -145,16 +152,16 @@ class Experiment:
 
     def train_and_eval(self):
         self.init_emb()
-
+        logger = self.logger
         graph_encoder = None
         if self.args.encoder:
-            graph_encoder = Encoder(self.args.encoder, self.hiddens, self.heads+[1], activation=F.elu, feat_drop=self.args.feat_drop, attn_drop=self.args.attn_drop, negative_slope=0.2, bias=False).to(device)
+            graph_encoder = Encoder(self.args.encoder, self.hiddens, self.heads+[1], activation=F.elu, feat_drop=self.args.feat_drop, attn_drop=self.args.attn_drop, negative_slope=0.2, bias=False).to(self.device)
             logger.info(graph_encoder)
         knowledge_decoder = []
         for idx, decoder_name in enumerate(self.args.decoder):
             knowledge_decoder.append(Decoder(decoder_name, params={
-                "e_num": d.ins_num,
-                "r_num": d.rel_num,
+                "e_num": self.d.ins_num,
+                "r_num": self.d.rel_num,
                 "dim": self.hiddens[-1],
                 "feat_drop": self.args.feat_drop,
                 "train_dist": self.args.train_dist,
@@ -164,7 +171,7 @@ class Experiment:
                 "alpha": self.args.alpha[idx],
                 "boot": self.args.bootstrap,
                 # pass other useful parameters to Decoder
-            }).to(device))
+            }).to(self.device))
         logger.info(knowledge_decoder)
 
         params = nn.ParameterList([self.ins_embeddings.weight, self.rel_embeddings.weight] + [p for k_d in knowledge_decoder for p in list(k_d.parameters())] + (list(graph_encoder.parameters()) if self.args.encoder else []))
@@ -176,21 +183,23 @@ class Experiment:
 
         # Train
         logger.info("Start training...")
+        d = self.d
         for it in range(0, self.args.epoch):
 
             for idx, k_d in enumerate(knowledge_decoder):
-                if (k_d.name == "align" and len(d.ill_train_idx) == 0):
+                if (k_d.name == "align" and len(self.d.ill_train_idx) == 0):
                     continue
                 t_ = time.time()
                 if k_d.print_name.startswith("["):  # Run Independent Model (only decoder)
-                    loss = self.train_1_epoch(it, opt, None, k_d, d.ins_G_edges_idx, d.triple_idx, d.ill_train_idx, [d.kg1_ins_ids, d.kg2_ins_ids], d.boot_triple_idx, d.boot_pair_dix, self.ins_embeddings.weight, self.rel_embeddings.weight)
+                    loss = self.train_1_epoch(it, opt, None, k_d, d.ins_G_edges_idx, d.triple_idx, d.ill_train_idx, d.kg_ins_ids, d.boot_triple_idx, d.boot_pair_dix, self.ins_embeddings.weight, self.rel_embeddings.weight)
                 else:               # Run Basic Model (encoder - decoder)
-                    loss = self.train_1_epoch(it, opt, graph_encoder, k_d, d.ins_G_edges_idx, d.triple_idx, d.ill_train_idx, [d.kg1_ins_ids, d.kg2_ins_ids], d.boot_triple_idx, d.boot_pair_dix, self.ins_embeddings.weight, self.rel_embeddings.weight)
+                    loss = self.train_1_epoch(it, opt, graph_encoder, k_d, d.ins_G_edges_idx, d.triple_idx, d.ill_train_idx, d.kg_ins_ids, d.boot_triple_idx, d.boot_pair_dix, self.ins_embeddings.weight, self.rel_embeddings.weight)
                 if hasattr(k_d, "mapping"):
                     self.mapping_ins_emb = k_d.mapping(self.ins_embeddings.weight).cpu().detach().numpy()
                 loss_name = "loss_" + k_d.print_name.replace("[", "_").replace("]", "_")
-                writer.add_scalar(loss_name, loss, it)
+                self.writer.add_scalar(loss_name, loss, it)
                 logger.info("epoch: %d\t%s: %.8f\ttime: %ds" % (it, loss_name, loss, int(time.time()-t_)) )
+                self.latest_loss = loss
 
             if self.args.dr:
                 scheduler.step()
@@ -247,15 +256,18 @@ class Experiment:
             if graph_encoder:
                 with torch.no_grad():
                     graph_encoder.eval()
-                    edges = torch.LongTensor(d.ins_G_edges_idx).to(device)
+                    edges = torch.LongTensor(d.ins_G_edges_idx).to(self.device)
                     enh_emb = graph_encoder(edges, self.ins_embeddings.weight)
                     np.save(self.save + "/%s_enh_ins.npy" % (time_str), enh_emb.cpu().detach().numpy())
-            np.save(self.save + "/%s_ins.npy" % (time_str), self.ins_embeddings.weight.cpu().detach().numpy())
-            np.save(self.save + "/%s_rel.npy" % (time_str), self.rel_embeddings.weight.cpu().detach().numpy())
+            self.ins_embeddings_string = self.save + "/%s_ins.npy" % (time_str)
+            np.save(self.ins_embeddings_string, self.ins_embeddings.weight.cpu().detach().numpy())
+            self.rel_embeddings_string = self.save + "/%s_rel.npy" % (time_str)
+            np.save(self.rel_embeddings_string, self.rel_embeddings.weight.cpu().detach().numpy())
             logger.info("Embeddings saved!")
     
 
     def train_1_epoch(self, it, opt, encoder, decoder, edges, triples, ills, ids, boot_triples, boot_pairs, ins_emb, rel_emb):
+        device = self.device
         if encoder:
             encoder.train()
         decoder.train()
@@ -306,7 +318,7 @@ class Experiment:
 
             if encoder:
                 use_edges = torch.LongTensor(edges).to(device)
-                enh_emb = encoder.forward(use_edges, ins_emb, rel_emb[d.r_ij_idx] if encoder.name=="naea" else None)
+                enh_emb = encoder.forward(use_edges, ins_emb, rel_emb[self.d.r_ij_idx] if encoder.name=="naea" else None)
             else:
                 enh_emb = ins_emb
             
@@ -329,6 +341,37 @@ class Experiment:
             losses.append(loss.item())
 
         return np.mean(losses)
+
+def setup_torch_logger(args):
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    writer = SummaryWriter("_runs/%s_%s" % (args.data_dir.split("/")[-1], args.log))
+
+    torch.backends.cudnn.deterministic = True
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    if args.cuda and torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+    device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
+    return logger, writer, device
+
+
+def run_experiment(logger, args, writer, device):
+    # Load Data
+    print('in experiment', args.combined_rdf, type(args.combined_rdf))
+    d = AlignmentData(data_dir=args.data_dir, rate=args.rate, combined_rdf = args.combined_rdf, share=args.share, swap=args.swap, val=args.val, with_r=args.encoder.lower()=="naea")
+    logger.info(d)
+
+    experiment = Experiment(args=args, d=d, writer=writer, device=device, logger = logger)
+
+    t_total = time.time()
+    experiment.train_and_eval()
+    logger.info("optimization finished!")
+    logger.info("total time elapsed: {:.4f} s".format(time.time() - t_total))
+    return experiment
+
 
 
 if __name__ == '__main__':
@@ -375,29 +418,11 @@ if __name__ == '__main__':
 
     parser.add_argument("--csls", type=int, default=0, help="whether to use csls in test (0 means not using)")
     parser.add_argument("--rerank", action="store_true", default=False, help="whether to use rerank in test")
+    parser.add_argument("--combined_rdf", action="store_true", default=False, help="whether a single graph or two graphs exist")
 
     args = parser.parse_args()
 
-    logger = logging.getLogger(__name__)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    writer = SummaryWriter("_runs/%s_%s" % (args.data_dir.split("/")[-1], args.log))
+    logger, writer, device = setup_torch_logger(args)
     logger.info(args)
+    run_experiment(logger, args)
 
-    torch.backends.cudnn.deterministic = True
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.cuda and torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-    device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
-
-    # Load Data
-    d = AlignmentData(data_dir=args.data_dir, rate=args.rate, share=args.share, swap=args.swap, val=args.val, with_r=args.encoder.lower()=="naea")
-    logger.info(d)
-
-    experiment = Experiment(args=args)
-
-    t_total = time.time()
-    experiment.train_and_eval()
-    logger.info("optimization finished!")
-    logger.info("total time elapsed: {:.4f} s".format(time.time() - t_total))

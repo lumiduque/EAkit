@@ -13,16 +13,20 @@ import numpy as np
 
 class AlignmentData:
 
-    def __init__(self, data_dir="data/DBP15K/ja_en", rate=0.3, share=False, swap=False, val=0.0, with_r=False):
+    def __init__(self, data_dir="data/DBP15K/ja_en", rate=0.3, combined_rdf = False, share=False, swap=False, val=0.0, with_r=False):
         t_ = time.time()
 
         self.rate = rate
         self.val = val
-        self.ins2id_dict, self.id2ins_dict, [self.kg1_ins_ids, self.kg2_ins_ids] = self.load_dict(data_dir + "/ent_ids_", file_num=2)
-        self.rel2id_dict, self.id2rel_dict, [self.kg1_rel_ids, self.kg2_rel_ids] = self.load_dict(data_dir + "/rel_ids_", file_num=2)
+        file_num = 1 if combined_rdf == True else 2
+        print('file_num', file_num)
+        self.ins2id_dict, self.id2ins_dict, self.kg_ins_ids = self.load_dict(data_dir + "/ent_ids", file_num=file_num)
+        print("kg_ins_ids", len(self.kg_ins_ids))
+        self.rel2id_dict, self.id2rel_dict, self.kg_rel_ids = self.load_dict(data_dir + "/rel_ids", file_num=file_num)
+        print("kg_rel_ids", len(self.kg_rel_ids))
         self.ins_num = len(self.ins2id_dict)
         self.rel_num = len(self.rel2id_dict)
-        self.triple_idx = self.load_triples(data_dir + "/triples_", file_num=2)
+        self.triple_idx = self.load_triples(data_dir + "/triples", file_num=file_num)
         self.ill_idx = self.load_triples(data_dir + "/ill_ent_ids", file_num=1)
         np.random.shuffle(self.ill_idx)
         self.ill_train_idx, self.ill_val_idx, self.ill_test_idx = np.array(self.ill_idx[:int(len(self.ill_idx) // 1 * rate)], dtype=np.int32), np.array(self.ill_idx[int(len(self.ill_idx) // 1 * rate) : int(len(self.ill_idx) // 1 * (rate+val))], dtype=np.int32), np.array(self.ill_idx[int(len(self.ill_idx) // 1 * (rate+val)):], dtype=np.int32)
@@ -31,7 +35,11 @@ class AlignmentData:
         assert (share != swap or (share == False and swap == False))
         if share:
             self.triple_idx = self.share(self.triple_idx, self.ill_train_idx)   # 1 -> 2:base
-            self.kg1_ins_ids = (self.kg1_ins_ids - set(self.ill_train_idx[:, 0])) | set(self.ill_train_idx[:, 1])
+            if combined_rdf == False:
+                self.kg_ins_ids = [((self.kg_ins_ids[0] - set(self.ill_train_idx[:, 0])) | set(self.ill_train_idx[:, 1])), self.kg_ins_ids[1]]
+            else:
+                self.kg_ins_ids = [((self.kg_ins_ids[0] - set(self.ill_train_idx[:, 0])) | set(self.ill_train_idx[:, 1]))]
+            print("post_len", len(self.kg_ins_ids))
             self.ill_train_idx = []
         if swap:
             self.triple_idx = self.swap(self.triple_idx, self.ill_train_idx)
@@ -43,7 +51,7 @@ class AlignmentData:
 
     def load_triples(self, data_dir, file_num=2):
         if file_num == 2:
-            file_names = [data_dir + str(i) for i in range(1, 3)]
+            file_names = [data_dir + '_' + str(i) for i in range(1, 3)]
         else:
             file_names = [data_dir]
         triple = []
@@ -57,7 +65,7 @@ class AlignmentData:
 
     def load_dict(self, data_dir, file_num=2):
         if file_num == 2:
-            file_names = [data_dir + str(i) for i in range(1, 3)]
+            file_names = [data_dir +  '_' + str(i) for i in range(1, 3)]
         else:
             file_names = [data_dir]
         what2id, id2what, ids = {}, {}, []

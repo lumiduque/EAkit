@@ -1,0 +1,25 @@
+0	video_type
+1	source_id
+2	release_country
+3	release_date
+4	external_id
+5	genre
+6	rating
+7	platform_availability
+8	type
+9	source
+10	people_source
+11	production_company
+12	season_number
+13	title
+14	role_Actor
+15	role_Executive Producer
+16	role_Director
+17	role_Writer
+18	role_Producer
+19	role_Composer
+20	role_Creator
+21	episode_number
+22	season
+23	source_talent_id
+24	runtime
